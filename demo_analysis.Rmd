@@ -181,6 +181,8 @@ gratia::draw(age_model)
 
 ```  
 
+  
+  
 So, we have weak evidence that people get less active with age (not surprising). In this case it does seem like a linear fit would be sufficient, as evidenced in part by the `edf` of 1 for the smooth term for age. With larger datasets this will not generally be the case, though. We could've fit to `log(total_mims)`; it improves the R^2 value a bit, but doesn't make a huge difference. 
 
 In any case, here's a linear fit to the data:  
@@ -217,20 +219,19 @@ y_ix <- seq(0,24, length.out = 1440) #Time index, hours (0-24)
 k_int <- 24 #knots for global intercept
 k_beta <- 24 #knots for functional effect including random effects
 ctrl <- mgcv::gam.control(trace = TRUE) # verbose=1
-
-mod_fx <- pffr(Y_lp1 ~ age10 + s(sub_code, bs="re"), 
-               data = scalar_df,
-               yind = y_ix, #Vector of time index, from 0 to 24 hours
-               bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
-               
-               bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
-               family = poisson(link = "log"),
-               algorithm = "bam", 
-               method = "fREML",
-               control = ctrl,
-               discrete = TRUE)
-
-summary(mod_fx, re.test = FALSE)
+# 
+# mod_fx <- pffr(Y_lp1 ~ age10 + s(sub_code, bs="re"), 
+#                data = scalar_df,
+#                yind = y_ix, #Vector of time index, from 0 to 24 hours
+#                bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
+#                
+#                bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
+#                algorithm = "bam", 
+#                method = "fREML",
+#                control = ctrl,
+#                discrete = TRUE)
+# 
+# summary(mod_fx, re.test = FALSE)
 
 
 #Then preidc, facet wrap, etc
