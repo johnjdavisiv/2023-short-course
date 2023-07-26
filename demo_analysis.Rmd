@@ -1,0 +1,241 @@
+---
+title: "Analysis of 24-hour accelerometer data"
+author: "John J Davis, PhD"
+date: '2023-07-26'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+```
+
+## Introduction and data info
+
+This document shows a worked example of analyzing 24-hour accelerometry data, using a subset of the open-access [Long-term Movement Monitoring Database](https://physionet.org/content/ltmm/1.0.0/). I've already summarized the raw 100 Hz acceleration data and summarized it in one-minute epochs as "MIMS units" via the `MIMSunit` R package ([link here](https://github.com/mHealthGroup/MIMSunit)). MIMS units are very similar to "counts" available from Actigraph devices, but they have some technical and practical advantages. Check out [the paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8301210/) for more on MIMS units. 
+
+The code and data accompanying this demo can be found at [GITHUB URL](http://github.com). 
+
+I made this demo to accompany my talk for the 2023 Mathematical Sciences in Obesity Research short course. This is an *educational* analysis meant to be quick and feasible on a lower-end laptop, which put some hard constraints on how much and how complex of a dataset we can work with. It also skips over some of the finer points that really do matter in research studies, like what to do about non-wear-time and other sources of missingness in your data.  Also, in part because of the small size of the dataset, we don't get particularly interesting or insightful results. Repeat this analysis on the entire NHANES cohort and it'd probably be a different story.  
+
+The present dataset consists of waist-worn accelerometer data from one 24-hour day (midnight to midnight) from 50 older adults. These older adults were classified as "fallers" (people who had a history of falls) and "controls" (no history of falls). This is a subset of the larger LTMMD; I preprocessed only subjects with a reasonable amount of wear time in their first 24-hour day of device wear. The full dataset is larger (~80 subjects) and has multiple days of data from each subject.  
+
+## Main goals  
+
+This educational demo is intended to showcase a few aspects of analyzing 24-hour accelerometer data:  
+
+* The right-skewed distribution typically seen in both aggregate and minute-by-minute accelerometer data  
+* Potential strategies for modeling continuous and categorical predictors of accelerometer-measured physical activity  
+* How to include smooth, nonlinear predictors in models of activity data
+* A functional data analysis (FDA) approach to modeling 24-hour activity  
+
+
+## Read in data
+
+As noted above, the data are already preprocessed into one-minute epochs. This substantially reduces the size of the data we need to download. Notice how for each subject we're calculating a `total_MIMS` variable that is just a sum of all of their accumulated MIMS units throughout the day.  
+
+
+```{r read_data, message = FALSE, warning = FALSE}
+
+library(tidyverse)
+library(mgcv)
+library(refund)
+
+# --- Load in our files and main dataframe ----
+main_df <- read_csv("data/main_df.csv", show_col_types = FALSE)
+all_files <- list.files("data/day_mims/", pattern="*.csv")
+
+#Preallocate
+df_list <- list()
+subject_df_list <- list()
+Y <- matrix(data=NA,nrow=length(all_files),ncol=1440) #1440 minutes in a day
+
+for (i in 1:length(all_files)){
+  f <- all_files[i]
+  this_subject <- gsub("\\_mims.csv$", "", f)
+  this_df <- read_csv(paste("data/day_mims/", f, sep=''), show_col_types = FALSE) %>%
+    mutate(hours = seq(0,24,length.out=1440),
+           sub_code = this_subject)
+  
+  #Total activity
+  this_subject_df <- main_df %>% filter(sub_code == this_subject) %>% 
+    mutate(total_mims = sum(this_df$MIMS_UNIT))
+  
+  Y[i,] <- this_df$MIMS_UNIT #Drop in 24hr activity data
+  df_list[[i]] <- this_subject_df #Slightly untidy but works
+}
+
+scalar_df <- bind_rows(df_list)
+
+```
+
+## Examine one day  
+
+Here's a pretty typical day from the dataset:  
+
+```{r plot_day}
+
+ix <- 2 #Which subject? 
+
+hour_seq <- seq(0, 24, by = 3)
+formatted_hours <- sprintf("%02d:00", hour_seq)
+
+ggplot(mapping = aes(x=seq(0,24,length.out=1440), 
+                     y = Y[ix,])) + 
+  geom_ribbon(aes(ymax = Y[ix,], ymin=0), fill = "navy", alpha = 0.4) + 
+  geom_line(size = 0.5, color = "navy") + 
+  ggtitle("24hrs of activity data, 1min summary") + 
+  scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.01,0),
+                     labels = formatted_hours,
+                     name = 'Time of day') +
+  scale_y_continuous(name = 'Activity level (MIMS units)') + 
+  theme(plot.title = element_text(hjust=0.5))
+
+
+
+```
+
+It's also worth looking at the histogram of MIMS units throughout the day:  
+
+
+``` {r mims_hist}
+
+ggplot(mapping = aes(x=Y[ix,])) + 
+  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+                 alpha = 0.2, bins = 25) + 
+  geom_density(color = "navy", size=1) + 
+  ggtitle("Distribution of activity level during the day") + 
+  scale_x_continuous(name = "Activity level (MIMS units)")
+
+
+```
+
+
+It's very right-skewed! This can be modestly improved with a `log(x+1)` transform (+1 because there are zero values).  
+
+``` {r logplot}
+
+ggplot(mapping = aes(x=log(Y[ix,] + 1))) + 
+  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+                 alpha = 0.2, bins = 25) + 
+  geom_density(color = "navy", size=1) + 
+  ggtitle("Distribution of activity level during the day") + 
+  scale_x_continuous(name = "Log(activity + 1)") 
+
+
+```
+
+## Aggregating daily activity 
+
+A simple way to summarize someone's activity level is to just add up their activity across the day, as we did above. Here's the distribution of total MIMS units, at the subject level:  
+
+``` {r sum_act}
+
+scalar_df %>%
+  ggplot(aes(x=total_mims)) + 
+  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+                 alpha = 0.2, bins = 15) + 
+  geom_density(color = "navy", size=1) + 
+  ggtitle("Sum of daily activity (N=50 subjects)") + 
+  scale_x_continuous(name = "Total MIMS units") 
+
+
+
+```
+
+Again, the situation improves a bit with a log transform (no plus one here since there are no zeros).  
+
+```{r dist_sum}
+
+
+
+scalar_df %>%
+  ggplot(aes(x=log(total_mims))) + 
+  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+                 alpha = 0.2, bins = 15) + 
+  geom_density(color = "navy", size=1) + 
+  ggtitle("Sum of daily activity (N=50 subjects)") + 
+  scale_x_continuous(name = "log(Total MIMS units)") 
+
+
+```
+
+From a modeling situation either modeling `total_mims` or `log(total_mims)` is likely justifiable. Here's a simple model testing to see if there is a (smooth, possibly nonlinear) association between age and total activity level.   
+
+``` {r gam_age}
+
+library(gratia)
+
+#k is number of knots for the spline - with REML penalization, we just need "enough"
+# - too many is not really a big concern
+k <- 7 # an approximate rule for k is sqrt() of number of unique values, here 49
+age_model <- gam(total_mims ~ s(age, bs="cr", k=k),
+                 method = "REML",
+                 data = scalar_df)
+
+summary(age_model)
+gratia::draw(age_model)
+
+
+
+```  
+
+So, we have weak evidence that people get less active with age (not surprising). In this case it does seem like a linear fit would be sufficient, as evidenced in part by the `edf` of 1 for the smooth term for age. With larger datasets this will not generally be the case, though. We could've fit to `log(total_mims)`; it improves the R^2 value a bit, but doesn't make a huge difference. 
+
+In any case, here's a linear fit to the data:  
+
+```{r lm_plot}
+
+scalar_df %>% 
+  ggplot(aes(x=age, y=total_mims)) + 
+  geom_point() + 
+  geom_smooth(method="lm")
+
+
+```
+
+## Analyzing the 24-hour activity cycle
+
+A more sophisticated analysis might involve looking at how 24-hour activity changes with age. This, too, can be modeled; we need a functional data model to do so. Below, I use the regression framework introduced by Sonja Greven and Fabian Scheipl in the `refund` package, which extends the scalar GAM from above to work with functional data.  Here, our "function" of interest is the 24-hour activity curve that we plotted earlier. Each subject's 24-hour day is one observation, and we can study how that observation changes as a function of covariates like age or whether this subject has a history of falls.  
+
+Greven and Schiepl's framework is very clever: it reframes functional regression as scalar regression, with the residuals being i.i.d. conditional on the model. That just means you need to model all of the sources of non-iid variation in the data, and your model will be correctly specified. The biggest change from the scalar model is the introduction of *smooth residuals*, $E_i(t)$, which are modeled as random functional effects.  
+
+The interface is pretty similar to MGCV. Here's code that fits a functional version of the same model from above, to study how the 24hr activity changes as a function of age 
+
+
+```{r pffr_block}
+#Warning - takes a while to run!
+
+#for now
+scalar_df$age10 <- scalar_df$age/10
+scalar_df$sub_code <- factor(scalar_df$sub_code)
+
+Y_lp1 <- log(Y + 1) # Log(x=1) transform, better for Gaussian link function
+
+y_ix <- seq(0,24, length.out = 1440) #Time index, hours (0-24)
+k_int <- 24 #knots for global intercept
+k_beta <- 24 #knots for functional effect including random effects
+ctrl <- mgcv::gam.control(trace = TRUE) # verbose=1
+
+mod_fx <- pffr(Y_lp1 ~ age10 + s(sub_code, bs="re"), 
+               data = scalar_df,
+               yind = y_ix, #Vector of time index, from 0 to 24 hours
+               bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
+               
+               bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
+               family = poisson(link = "log"),
+               algorithm = "bam", 
+               method = "fREML",
+               control = ctrl,
+               discrete = TRUE)
+
+summary(mod_fx, re.test = FALSE)
+
+
+#Then preidc, facet wrap, etc
+
+
+
+```
+
