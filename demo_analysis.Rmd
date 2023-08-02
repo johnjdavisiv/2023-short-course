@@ -39,8 +39,11 @@ As noted above, the data are already preprocessed into one-minute epochs. This s
 ```{r read_data, message = FALSE, warning = FALSE}
 
 library(tidyverse)
-library(mgcv)
-library(refund)
+library(viridis) #pretty colors
+library(mgcv) #for semiparametric regression
+library(refund) #for functional regression
+library(reshape2) #just for melt
+library(gratia) #Viewing mgcv model results
 
 # --- Load in our files and main dataframe ----
 main_df <- read_csv("data/main_df.csv", show_col_types = FALSE)
@@ -162,7 +165,6 @@ scalar_df %>%
   scale_x_continuous(name = "Total MIMS units") 
 
 
-
 ```
 
 Again, the situation improves a bit with a log transform (no plus one here since there are no zeros).  
@@ -185,8 +187,6 @@ scalar_df %>%
 From a modeling situation either modeling `total_mims` or `log(total_mims)` is likely justifiable. Here's a simple model testing to see if there is a (smooth, possibly nonlinear) association between age and total activity level.   
 
 ``` {r gam_age, warning=FALSE, message = FALSE}
-
-library(gratia)
 
 #k is number of knots for the spline - with REML penalization, we just need "enough"
 # - too many is not really a big concern
@@ -233,16 +233,18 @@ For simplicity, we consider only a constant linear effect of age (`c(age)`), tho
 #Warning - takes a while to run!
 
 #for now
-scalar_df$age5_centered <- (scalar_df$age - 75)/5#Standardize to 75 yr old, 5yr change
-scalar_df$sub_code <- factor(scalar_df$sub_code)
+scalar_df$age5_centered <- (scalar_df$age - 75)/5
+#Standardize to 75 yr old, 5yr change = one unit change for \beta (t)
+scalar_df$sub_code <- factor(scalar_df$sub_code) #mgcv requires factors for bs="re"
 
-Y_lp1 <- log(Y + 1) # Log(x=1) transform, better for Gaussian link function
+Y_lp1 <- log(Y + 1) # Log(x+1) transform, better for Gaussian link function
 
 y_ix <- seq(0,24, length.out = 1440) #Time index, hours (0-24)
-k_int <- 24 #knots for global intercept - try 48-64
+k_int <- 24 #knots for global intercept - try 16-24
 k_beta <- 64 #knots for functional effect including random effects - try 48-64
+# ^^^ k_beta is the biggest computational cost in the model. I think it's ~O(n^2) or even ^3
+# however k_beta must be big enough for smooth residuals to fit each curve well.
 ctrl <- mgcv::gam.control(trace = TRUE) # verbose=1
-
 
 mod_fx <- pffr(Y_lp1 ~ c(age5_centered) + s(sub_code, bs="re"),
                data = scalar_df,
@@ -250,15 +252,13 @@ mod_fx <- pffr(Y_lp1 ~ c(age5_centered) + s(sub_code, bs="re"),
                bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
                bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
                algorithm = "bam",
-               method = "fREML",
+               method = "fREML", #fast REML approximation
                control = ctrl,
-               discrete = TRUE)
+               discrete = TRUE) #use discrete approximation for speed
 
 summary(mod_fx, re.test = FALSE) #re.test slows down summary, not needed here
-
 plot(mod_fx, pages=1)
 
-library(reshape2)
 
 #Hack way to plot results
 pred_df <- predict(mod_fx) %>% as.data.frame() %>%
@@ -269,10 +269,8 @@ pred_df <- predict(mod_fx) %>% as.data.frame() %>%
   mutate(yhat_raw = exp(yhat) - 1) %>%
   mutate(sub_code = rep(scalar_df$sub_code, each = 1440))
 
-
 plot_pred_df <- pred_df %>% 
   filter(sub_code %in% plt_subs)
-
 
 day_df %>%
   filter(sub_code %in% plt_subs) %>%
@@ -283,8 +281,6 @@ day_df %>%
             color = "red", linewidth = 1, alpha = 0.6) + 
   facet_wrap(~sub_code) + 
   scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.02,0)) 
-
-
 
 
 ```
@@ -327,9 +323,7 @@ int_df <- data.frame(y_ix.vec = seq(0,24,length.out = 1440)) %>%
 beta_preds <- mgcv::predict.gam(mod_fx, type="iterms", 
                                 newdata = int_df, se.fit = TRUE)
 
-
 #Then do response for yhat on lp1 scale
-
 smooth_select <- paste("s(y_ix.vec):", "c(age5_centered)", sep="")
 smooth_select <- "age5_centered" #if c(age5_centered)
 
@@ -338,11 +332,11 @@ y_functional <- beta_preds$fit[,"s(y_ix.vec)"]
 y_functional_se <- beta_preds$se.fit[,"s(y_ix.vec)"]
 beta_t <- beta_preds$fit[,smooth_select]
 
-#LP - linear predictor
+#LP - linear predictor + 95% CIs
 y_LP <- y_constant + y_functional
 y_LP_low <- y_constant + y_functional - 1.96*y_functional_se
 y_LP_hi <- y_constant + y_functional + 1.96*y_functional_se
-
+#Also hack-ish, would be better with tidyfun:: methods but would introduce more dependencies
 beta_df <- data.frame(hours = seq(0,24,length.out=1440),
                       y_LP_65 = y_constant + y_functional + -2*beta_t,
                       y_LP_70 = y_constant + y_functional + -1*beta_t,
@@ -362,7 +356,6 @@ beta_df <- data.frame(hours = seq(0,24,length.out=1440),
          y_80 = exp(y_LP_80) - 1,
          y_85 = exp(y_LP_85) - 1)
                       
-
 beta_df %>%
   ggplot(aes(x=hours, y=yhat_raw)) + 
   geom_line(color = "navy") + 
@@ -382,11 +375,9 @@ Plotting age estimates:
 
 ``` {r age_fxn_plot}
 
-library(viridis)
 
 lwd <- 2
-
-age_col <-viridis(5, direction = 1)
+age_col <-viridis(5, direction = 1) #5 colors for 65-85
 
 beta_df %>%
   ggplot(aes(x=hours, y=yhat_raw)) + 
@@ -407,6 +398,79 @@ beta_df %>%
   theme(legend.position = "bottom") 
 
 
+```
+
+## Avenues for improvement  
+
+* Using repeated days within subjects (raw dataset has 2-3 days per person)  
+* Intelligently dealing with missing data, either through sparse FDA or other methods  
+* Trying a poisson, beta, or other extended-family regression model to deal with zero-inflation
+* Using principal component smooth residuals instead of P-spline basis residuals (`pcre()` terms in `pffr`)  
+
+
+## Some residual diagnosics  
+
+We can check how "good" our iid assumption is by plotting the residual correlation matrix. A perfectly-specified `pffr` model should be an identity matrix (all off-diagonal correlations = 0)  
+
+I suspect the worse-ish autocorrelation in the upper left (remember, that's midnight to ~5am) is from some, but not all, subjects taking the device off at night.  As above, that might be addressed by a cleverer transformation than `log(x+1)`.  
+
+
+``` {r resid_cor}
+
+
+resid_E = residuals(mod_fx)
+R_E <- cor(resid_E)
+
+melted_R <- melt(R_E)
+ggplot(data = melted_R, aes(x=Var2, y=Var1, fill=value)) + 
+  geom_raster() + 
+  scale_x_continuous(expand = c(0,0)) + 
+  scale_y_reverse(expand = c(0,0)) + 
+  scale_fill_gradientn(colors = c("#e41a1c", "white", "#377eb8"),
+                         limits = c(-1, 1),
+                         breaks = c(-1, 0, 1))  + 
+  ggtitle('Residual autocorrelation in original model')
+
+
 
 ```
 
+## Fit an intentionally-misspecified model and compare  
+
+If we skip the subject/curve-specific random effects (one in the same since we have one day from each subject) we misspecify the model and should have a lot more residual autocorrelation. Do we?  
+
+```{r mis_model, message = FALSE, warning = FALSE}
+
+
+mod_mis <- pffr(Y_lp1 ~ c(age5_centered),
+               data = scalar_df,
+               yind = y_ix, #Vector of time index, from 0 to 24 hours
+               bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
+               bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
+               algorithm = "bam",
+               method = "fREML", #fast REML approximation
+               control = ctrl,
+               discrete = TRUE) #use discrete approximation for speed
+
+#summary(mod_mis, re.test = FALSE)
+#plot(mod_mis, pages=1)
+
+resid_M = residuals(mod_mis)
+R_M <- cor(resid_M)
+
+melted_RM <- melt(R_M)
+
+
+ggplot(data = melted_RM, aes(x=Var2, y=Var1, fill=value)) + 
+  geom_raster() + 
+  scale_x_continuous(expand = c(0,0)) + 
+  scale_y_reverse(expand = c(0,0)) + 
+  scale_fill_gradientn(colors = c("#e41a1c", "white", "#377eb8"),
+                       limits = c(-1, 1),
+                       breaks = c(-1, 0, 1)) + 
+  ggtitle('Residual autocorrelation in misspecified model')
+
+
+```  
+
+Much worse! 
