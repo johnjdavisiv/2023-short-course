@@ -4,3 +4,6 @@
 *.pptx
 *.gdoc
 *.pdf
+
+# Except slides
+!short_course_slides.pdf

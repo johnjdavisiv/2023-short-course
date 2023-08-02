@@ -15,7 +15,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 This document shows a worked example of analyzing 24-hour accelerometry data, using a subset of the open-access [Long-term Movement Monitoring Database](https://physionet.org/content/ltmm/1.0.0/). I've already summarized the raw 100 Hz acceleration data and summarized it in one-minute epochs as "MIMS units" via the `MIMSunit` R package ([link here](https://github.com/mHealthGroup/MIMSunit)). MIMS units are very similar to "counts" available from Actigraph devices, but they have some technical and practical advantages. Check out [the paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8301210/) for more on MIMS units. 
 
-The code and data accompanying this demo can be found at [GITHUB URL](http://github.com). 
+The code and data accompanying this demo can be found at [GitHub here](https://github.com/johnjdavisiv/2023-short-course). 
 
 I made this demo to accompany my talk for the 2023 Mathematical Sciences in Obesity Research short course. This is an *educational* analysis meant to be quick and feasible on a lower-end laptop, which put some hard constraints on how much and how complex of a dataset we can work with. It also skips over some of the finer points that really do matter in research studies, like what to do about non-wear-time and other sources of missingness in your data.  Also, in part because of the small size of the dataset, we don't get particularly interesting or insightful results. Repeat this analysis on the entire NHANES cohort and it'd probably be a different story.  
 
@@ -48,6 +48,8 @@ all_files <- list.files("data/day_mims/", pattern="*.csv")
 
 #Preallocate
 df_list <- list()
+day_list <- list()
+
 subject_df_list <- list()
 Y <- matrix(data=NA,nrow=length(all_files),ncol=1440) #1440 minutes in a day
 
@@ -62,11 +64,14 @@ for (i in 1:length(all_files)){
   this_subject_df <- main_df %>% filter(sub_code == this_subject) %>% 
     mutate(total_mims = sum(this_df$MIMS_UNIT))
   
+  day_list[[i]] <- this_df
   Y[i,] <- this_df$MIMS_UNIT #Drop in 24hr activity data
   df_list[[i]] <- this_subject_df #Slightly untidy but works
 }
 
 scalar_df <- bind_rows(df_list)
+day_df <- bind_rows(day_list)
+
 
 ```
 
@@ -84,7 +89,7 @@ formatted_hours <- sprintf("%02d:00", hour_seq)
 ggplot(mapping = aes(x=seq(0,24,length.out=1440), 
                      y = Y[ix,])) + 
   geom_ribbon(aes(ymax = Y[ix,], ymin=0), fill = "navy", alpha = 0.4) + 
-  geom_line(size = 0.5, color = "navy") + 
+  geom_line(linewidth = 0.5, color = "navy") + 
   ggtitle("24hrs of activity data, 1min summary") + 
   scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.01,0),
                      labels = formatted_hours,
@@ -92,6 +97,22 @@ ggplot(mapping = aes(x=seq(0,24,length.out=1440),
   scale_y_continuous(name = 'Activity level (MIMS units)') + 
   theme(plot.title = element_text(hjust=0.5))
 
+
+```
+
+And here's data from several subjects:  
+
+
+```{r multi_day}
+
+plt_subs <- day_df$sub_code %>% unique() %>% head(9)
+
+day_df %>%
+  filter(sub_code %in% plt_subs) %>%
+  ggplot(aes(x=hours, y=MIMS_UNIT, group = sub_code)) + 
+  geom_ribbon(aes(ymax = MIMS_UNIT, ymin=0), fill = "navy", alpha = 0.4) + 
+  geom_line(linewidth = 0.25, color="navy") + 
+  facet_wrap(~sub_code, ncol=3)
 
 
 ```
@@ -149,7 +170,6 @@ Again, the situation improves a bit with a log transform (no plus one here since
 ```{r dist_sum}
 
 
-
 scalar_df %>%
   ggplot(aes(x=log(total_mims))) + 
   geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
@@ -159,11 +179,12 @@ scalar_df %>%
   scale_x_continuous(name = "log(Total MIMS units)") 
 
 
+
 ```
 
 From a modeling situation either modeling `total_mims` or `log(total_mims)` is likely justifiable. Here's a simple model testing to see if there is a (smooth, possibly nonlinear) association between age and total activity level.   
 
-``` {r gam_age}
+``` {r gam_age, warning=FALSE, message = FALSE}
 
 library(gratia)
 
@@ -203,38 +224,187 @@ A more sophisticated analysis might involve looking at how 24-hour activity chan
 
 Greven and Schiepl's framework is very clever: it reframes functional regression as scalar regression, with the residuals being i.i.d. conditional on the model. That just means you need to model all of the sources of non-iid variation in the data, and your model will be correctly specified. The biggest change from the scalar model is the introduction of *smooth residuals*, $E_i(t)$, which are modeled as random functional effects.  
 
-The interface is pretty similar to MGCV. Here's code that fits a functional version of the same model from above, to study how the 24hr activity changes as a function of age 
+The interface is pretty similar to MGCV. Here's code that fits a functional version of the same model from above, to study how the 24hr activity changes as a function of age.
+
+For simplicity, we consider only a constant linear effect of age (`c(age)`), though remember on the log scale this implies multiplicative effects.  
 
 
-```{r pffr_block}
+```{r pffr_block, message = FALSE, warning = FALSE}
 #Warning - takes a while to run!
 
 #for now
-scalar_df$age10 <- scalar_df$age/10
+scalar_df$age5_centered <- (scalar_df$age - 75)/5#Standardize to 75 yr old, 5yr change
 scalar_df$sub_code <- factor(scalar_df$sub_code)
 
 Y_lp1 <- log(Y + 1) # Log(x=1) transform, better for Gaussian link function
 
 y_ix <- seq(0,24, length.out = 1440) #Time index, hours (0-24)
-k_int <- 24 #knots for global intercept
-k_beta <- 24 #knots for functional effect including random effects
+k_int <- 24 #knots for global intercept - try 48-64
+k_beta <- 64 #knots for functional effect including random effects - try 48-64
 ctrl <- mgcv::gam.control(trace = TRUE) # verbose=1
-# 
-# mod_fx <- pffr(Y_lp1 ~ age10 + s(sub_code, bs="re"), 
-#                data = scalar_df,
-#                yind = y_ix, #Vector of time index, from 0 to 24 hours
-#                bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
-#                
-#                bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
-#                algorithm = "bam", 
-#                method = "fREML",
-#                control = ctrl,
-#                discrete = TRUE)
-# 
-# summary(mod_fx, re.test = FALSE)
 
 
-#Then preidc, facet wrap, etc
+mod_fx <- pffr(Y_lp1 ~ c(age5_centered) + s(sub_code, bs="re"),
+               data = scalar_df,
+               yind = y_ix, #Vector of time index, from 0 to 24 hours
+               bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
+               bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
+               algorithm = "bam",
+               method = "fREML",
+               control = ctrl,
+               discrete = TRUE)
+
+summary(mod_fx, re.test = FALSE) #re.test slows down summary, not needed here
+
+plot(mod_fx, pages=1)
+
+library(reshape2)
+
+#Hack way to plot results
+pred_df <- predict(mod_fx) %>% as.data.frame() %>%
+  pivot_longer(everything(), names_prefix  = "V", values_to = "yhat", 
+               names_to = "sample") %>%
+  mutate(sample = as.numeric(sample),
+         hours = (sample-1)/1439*24) %>% #care, off by one
+  mutate(yhat_raw = exp(yhat) - 1) %>%
+  mutate(sub_code = rep(scalar_df$sub_code, each = 1440))
+
+
+plot_pred_df <- pred_df %>% 
+  filter(sub_code %in% plt_subs)
+
+
+day_df %>%
+  filter(sub_code %in% plt_subs) %>%
+  ggplot(aes(x=hours, y=MIMS_UNIT, group = sub_code)) + 
+  geom_ribbon(aes(ymax = MIMS_UNIT, ymin=0), fill = "navy", alpha = 0.2) + 
+  geom_line(linewidth = 0.25, color="navy", alpha = 0.4) + 
+  geom_line(aes(y=yhat_raw), data = plot_pred_df, 
+            color = "red", linewidth = 1, alpha = 0.6) + 
+  facet_wrap(~sub_code) + 
+  scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.02,0)) 
+
+
+
+
+```
+
+View on linear predictor scale (`log(x+1)`)  
+
+
+``` {r log_scale}
+
+
+day_df %>%
+  mutate(log_p1_mims = log(MIMS_UNIT + 1)) %>%
+  filter(sub_code %in% plt_subs) %>%
+  ggplot(aes(x=hours, y=log_p1_mims, group = sub_code)) + 
+  geom_ribbon(aes(ymax = log_p1_mims, ymin=0), fill = "navy", alpha = 0.2) + 
+  geom_line(linewidth = 0.25, color="navy", alpha = 0.4) + 
+  geom_line(aes(y=yhat), data = plot_pred_df, 
+            color = "red", linewidth = 1, alpha = 0.6) + 
+  facet_wrap(~sub_code) + 
+  scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.02,0)) 
+
+```
+
+Viewing functional model:  
+
+
+
+``` {r int_scale}
+
+
+#Hacking the underlying GAM to get raw predictions
+#y_ix.vec name is a consequence of passing variable y_ix earlier. 
+#If we used t, it would be called t.vec
+int_df <- data.frame(y_ix.vec = seq(0,24,length.out = 1440)) %>%
+  mutate(sub_code = factor("CO002"),
+         age5_centered = 1) 
+#Will ignore subject when constructing intercept, needed to dodge predict warning
+      
+#iterms to include intercept uncertainty
+beta_preds <- mgcv::predict.gam(mod_fx, type="iterms", 
+                                newdata = int_df, se.fit = TRUE)
+
+
+#Then do response for yhat on lp1 scale
+
+smooth_select <- paste("s(y_ix.vec):", "c(age5_centered)", sep="")
+smooth_select <- "age5_centered" #if c(age5_centered)
+
+y_constant <- attr(beta_preds, "constant") 
+y_functional <- beta_preds$fit[,"s(y_ix.vec)"]
+y_functional_se <- beta_preds$se.fit[,"s(y_ix.vec)"]
+beta_t <- beta_preds$fit[,smooth_select]
+
+#LP - linear predictor
+y_LP <- y_constant + y_functional
+y_LP_low <- y_constant + y_functional - 1.96*y_functional_se
+y_LP_hi <- y_constant + y_functional + 1.96*y_functional_se
+
+beta_df <- data.frame(hours = seq(0,24,length.out=1440),
+                      y_LP_65 = y_constant + y_functional + -2*beta_t,
+                      y_LP_70 = y_constant + y_functional + -1*beta_t,
+                      y_LP_75 = y_constant + y_functional + 0*beta_t,
+                      y_LP_80 = y_constant + y_functional + 1*beta_t,
+                      y_LP_85 = y_constant + y_functional + 2*beta_t,
+                      y_LP = y_constant + y_functional,
+                      y_LP_low = y_constant + y_functional - 1.96*y_functional_se,
+                      y_LP_hi = y_constant + y_functional + 1.96*y_functional_se) %>%
+  mutate(yhat_raw = exp(y_LP) - 1,
+         yhat_raw_low = exp(y_LP_low) - 1,
+         yhat_raw_hi = exp(y_LP_hi) - 1
+         ) %>%
+  mutate(y_65 = exp(y_LP_65) - 1,
+         y_70 = exp(y_LP_70) - 1,
+         y_75 = exp(y_LP_75) - 1,
+         y_80 = exp(y_LP_80) - 1,
+         y_85 = exp(y_LP_85) - 1)
+                      
+
+beta_df %>%
+  ggplot(aes(x=hours, y=yhat_raw)) + 
+  geom_line(color = "navy") + 
+  geom_ribbon(aes(ymin = yhat_raw_low, ymax = yhat_raw_hi),
+              fill = "navy", alpha = 0.2) + 
+  scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.01,0),
+                     labels = formatted_hours,
+                     name = 'Time of day') +
+  ggtitle("Estimated average daily activity pattern for a 75 yr old") 
+
+
+```
+
+
+Plotting age estimates: 
+
+
+``` {r age_fxn_plot}
+
+library(viridis)
+
+lwd <- 2
+
+age_col <-viridis(5, direction = 1)
+
+beta_df %>%
+  ggplot(aes(x=hours, y=yhat_raw)) + 
+  geom_line(aes(y=y_65), color = age_col[1], linewidth = lwd) +
+  geom_line(aes(y=y_70), color = age_col[2], linewidth = lwd) +
+  geom_line(aes(y=y_75), color = age_col[3], linewidth = lwd) + 
+  geom_line(aes(y=y_80), color = age_col[4], linewidth = lwd) + 
+  geom_line(aes(y=y_85), color = age_col[5], linewidth = lwd)  + 
+  geom_point(aes(color = hours), alpha = 0) + 
+  scale_color_viridis_c(option="viridis", limits = c(65,85),
+                        breaks = c(65, 70, 75, 80, 85), 
+                        labels = c('65', '70', '75', '80', '85')) + 
+  guides(color = guide_colorbar(title = "Age (yrs)")) + 
+  scale_x_continuous(limits=c(0,24), breaks = hour_seq, expand = c(0.01,0),
+                     labels = formatted_hours,
+                     name = 'Time of day') +
+  ggtitle("Estimated effect of age on 24-hr activity") + 
+  theme(legend.position = "bottom") 
 
 
 
