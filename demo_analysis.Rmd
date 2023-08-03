@@ -126,9 +126,9 @@ It's also worth looking at the histogram of MIMS units throughout the day:
 ``` {r mims_hist}
 
 ggplot(mapping = aes(x=Y[ix,])) + 
-  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+  geom_histogram(aes(y = after_stat(density)), colour="black", fill="navy", 
                  alpha = 0.2, bins = 25) + 
-  geom_density(color = "navy", size=1) + 
+  geom_density(color = "navy", linewidth=1) + 
   ggtitle("Distribution of activity level during the day") + 
   scale_x_continuous(name = "Activity level (MIMS units)")
 
@@ -141,9 +141,9 @@ It's very right-skewed! This can be modestly improved with a `log(x+1)` transfor
 ``` {r logplot}
 
 ggplot(mapping = aes(x=log(Y[ix,] + 1))) + 
-  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+  geom_histogram(aes(y = after_stat(density)), colour="black", fill="navy", 
                  alpha = 0.2, bins = 25) + 
-  geom_density(color = "navy", size=1) + 
+  geom_density(color = "navy", linewidth=1) + 
   ggtitle("Distribution of activity level during the day") + 
   scale_x_continuous(name = "Log(activity + 1)") 
 
@@ -158,9 +158,9 @@ A simple way to summarize someone's activity level is to just add up their activ
 
 scalar_df %>%
   ggplot(aes(x=total_mims)) + 
-  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+  geom_histogram(aes(y = after_stat(density)), colour="black", fill="navy", 
                  alpha = 0.2, bins = 15) + 
-  geom_density(color = "navy", size=1) + 
+  geom_density(color = "navy", linewidth=1) + 
   ggtitle("Sum of daily activity (N=50 subjects)") + 
   scale_x_continuous(name = "Total MIMS units") 
 
@@ -174,9 +174,9 @@ Again, the situation improves a bit with a log transform (no plus one here since
 
 scalar_df %>%
   ggplot(aes(x=log(total_mims))) + 
-  geom_histogram(aes(y = ..density..), colour="black", fill="navy", 
+  geom_histogram(aes(y = after_stat(density)), colour="black", fill="navy", 
                  alpha = 0.2, bins = 15) + 
-  geom_density(color = "navy", size=1) + 
+  geom_density(color = "navy", linewidth=1) + 
   ggtitle("Sum of daily activity (N=50 subjects)") + 
   scale_x_continuous(name = "log(Total MIMS units)") 
 
@@ -184,7 +184,7 @@ scalar_df %>%
 
 ```
 
-From a modeling situation either modeling `total_mims` or `log(total_mims)` is likely justifiable. Here's a simple model testing to see if there is a (smooth, possibly nonlinear) association between age and total activity level.   
+From a modeling situation either modeling `total_mims` or `log(total_mims)` is likely justifiable. Here's a simple model testing to see if there is a (smooth, possibly nonlinear) association between age and total activity level. 
 
 ``` {r gam_age, warning=FALSE, message = FALSE}
 
@@ -195,8 +195,8 @@ age_model <- gam(total_mims ~ s(age, bs="cr", k=k),
                  method = "REML",
                  data = scalar_df)
 
-summary(age_model)
-gratia::draw(age_model)
+summary(age_model) #p = 0.049, I promise I didn't p-hack this result!
+gratia::draw(age_model) #Using Gavin Simpson's nice GAM viz tool
 
 
 
@@ -204,7 +204,7 @@ gratia::draw(age_model)
 
   
   
-So, we have weak evidence that people get less active with age (not surprising). In this case it does seem like a linear fit would be sufficient, as evidenced in part by the `edf` of 1 for the smooth term for age. With larger datasets this will not generally be the case, though. We could've fit to `log(total_mims)`; it improves the R^2 value a bit, but doesn't make a huge difference. 
+So, we have weak evidence that people get less active with age (not that surprising). In this case it does seem like a linear fit would be sufficient (though we didn't formally test for it), as evidenced in part by the `edf` of 1 for the smooth term for age. With larger datasets this will not generally be the case, though. We could've fit to `log(total_mims)`; it improves the $R^2$ value a bit, but doesn't make a huge difference. 
 
 In any case, here's a linear fit to the data:  
 
@@ -218,16 +218,21 @@ scalar_df %>%
 
 ```
 
-## Analyzing the 24-hour activity cycle
+## Analyzing the 24-hour activity cycle  
 
-A more sophisticated analysis might involve looking at how 24-hour activity changes with age. This, too, can be modeled; we need a functional data model to do so. Below, I use the regression framework introduced by Sonja Greven and Fabian Scheipl in the `refund` package, which extends the scalar GAM from above to work with functional data.  Here, our "function" of interest is the 24-hour activity curve that we plotted earlier. Each subject's 24-hour day is one observation, and we can study how that observation changes as a function of covariates like age or whether this subject has a history of falls.  
+A more sophisticated analysis might involve looking at how 24-hour activity changes with age. This, too, can be modeled; we need a functional data model to do so. Below, I use the [functional regression framework introduced by Sonja Greven and Fabian Scheipl](https://journals.sagepub.com/doi/abs/10.1177/1471082X16681317) in the `refund` package, which extends the scalar GAM from above to work with functional data.  Here, our "function" of interest is the 24-hour activity curve that we plotted earlier. Each subject's 24-hour day is one observation, and we can study how that observation changes as a function of covariates like age or whether this subject has a history of falls.  
 
-Greven and Schiepl's framework is very clever: it reframes functional regression as scalar regression, with the residuals being i.i.d. conditional on the model. That just means you need to model all of the sources of non-iid variation in the data, and your model will be correctly specified. The biggest change from the scalar model is the introduction of *smooth residuals*, $E_i(t)$, which are modeled as random functional effects.  
+Greven and Schiepl's framework is very clever: it reframes functional regression as scalar regression, with the residuals being i.i.d. conditional on the model. That just means you need to model all of the sources of non-iid variation in the data, and your model will be correctly specified. The biggest change from the scalar model is the introduction of *smooth residuals*, $E_i(t)$, which are modeled as random functional effects.  So the model fit below is:  
 
-The interface is pretty similar to MGCV. Here's code that fits a functional version of the same model from above, to study how the 24hr activity changes as a function of age.
+$y = ...$
 
-For simplicity, we consider only a constant linear effect of age (`c(age)`), though remember on the log scale this implies multiplicative effects.  
+The `refund` interface is very similar to `mgcv`, given that they're built on top of each other. Here's code that fits a functional version of the same model from above, to study how the 24hr activity changes as a function of age.
 
+For simplicity, we consider only a constant linear effect of age (` ~ c(age)`), though remember on the log scale this implies multiplicative effects. With more subjects, it'd be reasonable to look at a smooth linear functional effect (`~ age`), and with lots of subjects you could even do a smooth nonlinear functioanl effect (`~ s(age)`).  
+
+For a more interpretable intercept, notice that we're rescaling age to `age5_centered`: now, an age of "0" corresponds to being 75 years old, and a one unit change in age is a 5-year increase in age. This just helps make the intercept term $\beta_0(t)$ more easily-interpretable: it's the expected 24hr activity level for a 75-year-old (after `log(x+1)` transformation of course).   
+
+This model takes a little while to fit--the biggest computational cost is the spline basis for the smooth random effects.  
 
 ```{r pffr_block, message = FALSE, warning = FALSE}
 #Warning - takes a while to run!
@@ -243,32 +248,43 @@ y_ix <- seq(0,24, length.out = 1440) #Time index, hours (0-24)
 k_int <- 24 #knots for global intercept - try 16-24
 k_beta <- 64 #knots for functional effect including random effects - try 48-64
 # ^^^ k_beta is the biggest computational cost in the model. I think it's ~O(n^2) or even ^3
-# however k_beta must be big enough for smooth residuals to fit each curve well.
-ctrl <- mgcv::gam.control(trace = TRUE) # verbose=1
+# however k_beta must be big enough for smooth residuals to fit each curve well
+# so it's very important for the model to have enough df to fit each curve accurately
 
+ctrl <- mgcv::gam.control(trace = TRUE) # verbose=1 to track fitting
+
+#Note use of bs='cp' to induce cyclic continuity, since this is 24hr data
+# (induces a warning about marginal spline reparameterization)
 mod_fx <- pffr(Y_lp1 ~ c(age5_centered) + s(sub_code, bs="re"),
                data = scalar_df,
                yind = y_ix, #Vector of time index, from 0 to 24 hours
                bs.yindex = list(bs="cp", k=k_beta, m=c(2,1)), #k cubic P-splines
                bs.int = list(bs = "cp", k=k_int, m=c(2,1)),
-               algorithm = "bam",
-               method = "fREML", #fast REML approximation
+               algorithm = "bam", #big additive model mode, for speed
+               method = "fREML", #fast REML approximation, for speed
                control = ctrl,
-               discrete = TRUE) #use discrete approximation for speed
+               discrete = TRUE) #use discrete approximation, for speed
 
 summary(mod_fx, re.test = FALSE) #re.test slows down summary, not needed here
 plot(mod_fx, pages=1)
 
+```
 
-#Hack way to plot results
+We can visually inspect some subject-specific curves to see how well the model is fitting the curves:  
+
+
+``` {r fit_check}
+
+#Hack the underlying mgcv::gam to get the partial effects
 pred_df <- predict(mod_fx) %>% as.data.frame() %>%
   pivot_longer(everything(), names_prefix  = "V", values_to = "yhat", 
                names_to = "sample") %>%
   mutate(sample = as.numeric(sample),
-         hours = (sample-1)/1439*24) %>% #care, off by one
-  mutate(yhat_raw = exp(yhat) - 1) %>%
+         hours = (sample-1)/1439*24) %>% #care, off-by-one
+  mutate(yhat_raw = exp(yhat) - 1) %>% #transform back to raw scale
   mutate(sub_code = rep(scalar_df$sub_code, each = 1440))
 
+#Pick 9 subjects to plot
 plot_pred_df <- pred_df %>% 
   filter(sub_code %in% plt_subs)
 
@@ -285,11 +301,10 @@ day_df %>%
 
 ```
 
-View on linear predictor scale (`log(x+1)`)  
+We can also check out the fit on the "linear predictor" scale (`log(x+1)`)  
 
 
 ``` {r log_scale}
-
 
 day_df %>%
   mutate(log_p1_mims = log(MIMS_UNIT + 1)) %>%
@@ -304,8 +319,7 @@ day_df %>%
 
 ```
 
-Viewing functional model:  
-
+Now let's take a look at the functional effects:  
 
 
 ``` {r int_scale}
@@ -400,26 +414,30 @@ beta_df %>%
 
 ```
 
-## Avenues for improvement  
+## Possible avenues for improvement  
 
-* Using repeated days within subjects (raw dataset has 2-3 days per person)  
+* Using repeated days within subjects (raw dataset has 2-3 days per person). Would need a subject-level random effect as well as a curve-level random effect.  
 * Intelligently dealing with missing data, either through sparse FDA or other methods  
 * Trying a poisson, beta, or other extended-family regression model to deal with zero-inflation
-* Using principal component smooth residuals instead of P-spline basis residuals (`pcre()` terms in `pffr`)  
+* Using principal component smooth residuals instead of P-spline basis residuals (`pcre()` terms in `pffr`) - might fit much faster since dimensionality of the smooth residuals is the computational bottleneck  
 
 
 ## Some residual diagnosics  
 
-We can check how "good" our iid assumption is by plotting the residual correlation matrix. A perfectly-specified `pffr` model should be an identity matrix (all off-diagonal correlations = 0)  
+We can check how "good" our iid assumption is by plotting the residual functions and the residual correlation matrix. A perfectly-specified `pffr` model should have residuals that look like pure white noise centered around zero, and should have a residual correllation matrix that is just the identity matrix (all off-diagonal correlations = 0)  
 
-I suspect the worse-ish autocorrelation in the upper left (remember, that's midnight to ~5am) is from some, but not all, subjects taking the device off at night.  As above, that might be addressed by a cleverer transformation than `log(x+1)`.  
+I suspect the worse-ish autocorrelation in the upper left (remember, that's midnight to ~6am) is from some--but not all--subjects taking the device off at night, creating a perfect flat line.  As above, that might be addressed by a cleverer transformation than `log(x+1)`.  
 
 
 ``` {r resid_cor}
 
-
 resid_E = residuals(mod_fx)
 R_E <- cor(resid_E)
+
+
+matplot(t(resid_E), type="l")
+title("Residual functions for original model")
+
 
 melted_R <- melt(R_E)
 ggplot(data = melted_R, aes(x=Var2, y=Var1, fill=value)) + 
@@ -437,7 +455,7 @@ ggplot(data = melted_R, aes(x=Var2, y=Var1, fill=value)) +
 
 ## Fit an intentionally-misspecified model and compare  
 
-If we skip the subject/curve-specific random effects (one in the same since we have one day from each subject) we misspecify the model and should have a lot more residual autocorrelation. Do we?  
+If we skip the subject/curve-specific random effects (one and the same since we have one day from each subject) we misspecify the model and should have a lot more residual autocorrelation. Do we?  
 
 ```{r mis_model, message = FALSE, warning = FALSE}
 
@@ -460,6 +478,8 @@ R_M <- cor(resid_M)
 
 melted_RM <- melt(R_M)
 
+matplot(t(resid_M), type="l")
+title("Residual functions for misspecified model")
 
 ggplot(data = melted_RM, aes(x=Var2, y=Var1, fill=value)) + 
   geom_raster() + 
@@ -473,4 +493,4 @@ ggplot(data = melted_RM, aes(x=Var2, y=Var1, fill=value)) +
 
 ```  
 
-Much worse! 
+Much worse! The lack of smooth residuals results in a lot of residual autocorrellation and very non-iid residual functions.
